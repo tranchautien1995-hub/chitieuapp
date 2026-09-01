@@ -12,9 +12,9 @@
 
 /* Begin PBXFileReference section */
 		A10000000000000000000010 /* ChiTieu.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ChiTieu.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		A10000000000000000000011 /* ChiTieuApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChiTieuApp.swift; sourceTree = "<group>"; };
-		A10000000000000000000012 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
-		A10000000000000000000013 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A10000000000000000000011 /* ChiTieuApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChiTieu/ChiTieuApp.swift; sourceTree = SOURCE_ROOT; };
+		A10000000000000000000012 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = ChiTieu/Assets.xcassets; sourceTree = SOURCE_ROOT; };
+		A10000000000000000000013 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = ChiTieu/Info.plist; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
