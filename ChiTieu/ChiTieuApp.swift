@@ -949,41 +949,46 @@ struct HistoryView: View {
                     }
                     .padding()
                 } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 18) {
-                            ForEach(grouped, id: \.0) { day, items in
-                                VStack(alignment: .leading, spacing: 8) {
-                                    HStack {
-                                        Text(Formatters.day.string(from: day).capitalized)
-                                            .font(.subheadline.bold())
-                                            .foregroundColor(AppTheme.textSecondary)
-                                        Spacer()
-                                        Text(Formatters.money(items.reduce(0) { $0 + $1.amount }))
-                                            .font(.subheadline.bold())
-                                            .foregroundColor(AppTheme.greenSoft)
+                    List {
+                        ForEach(grouped, id: \.0) { day, items in
+                            Section {
+                                ForEach(items) { expense in
+                                    Button(action: { selectedExpense = expense }) {
+                                        ExpenseRow(expense: expense)
+                                            .padding(.horizontal, 14)
+                                            .background(AppTheme.card)
+                                            .cornerRadius(16)
                                     }
-
-                                    VStack(spacing: 0) {
-                                        ForEach(Array(items.enumerated()), id: \.element.id) { index, expense in
-                                            Button(action: { selectedExpense = expense }) {
-                                                ExpenseRow(expense: expense)
-                                            }
-                                            .buttonStyle(PlainButtonStyle())
-
-                                            if index < items.count - 1 {
-                                                Divider().background(AppTheme.divider).padding(.leading, 54)
-                                            }
+                                    .buttonStyle(PlainButtonStyle())
+                                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+                                    .listRowBackground(AppTheme.background)
+                                    .listRowSeparator(.hidden)
+                                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                        Button(role: .destructive) {
+                                            store.delete(expense)
+                                        } label: {
+                                            Label("Xóa", systemImage: "trash.fill")
                                         }
                                     }
-                                    .padding(.horizontal, 14)
-                                    .background(AppTheme.card)
-                                    .cornerRadius(18)
                                 }
+                            } header: {
+                                HStack {
+                                    Text(Formatters.day.string(from: day).capitalized)
+                                        .font(.subheadline.bold())
+                                        .foregroundColor(AppTheme.textSecondary)
+                                    Spacer()
+                                    Text(Formatters.money(items.reduce(0) { $0 + $1.amount }))
+                                        .font(.subheadline.bold())
+                                        .foregroundColor(AppTheme.greenSoft)
+                                }
+                                .textCase(nil)
+                                .padding(.top, 8)
                             }
                         }
-                        .padding(16)
-                        .padding(.bottom, 80)
                     }
+                    .listStyle(PlainListStyle())
+                    .background(AppTheme.background)
+                    .padding(.bottom, 72)
                 }
             }
             .navigationTitle("Lịch sử")
