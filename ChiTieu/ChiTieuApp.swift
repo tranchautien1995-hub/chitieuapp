@@ -55,6 +55,272 @@ struct Expense: Identifiable, Codable, Equatable {
     }
 }
 
+
+// MARK: - Excel (.xlsx) export
+
+private extension Data {
+    mutating func appendUInt16LE(_ value: UInt16) {
+        var little = value.littleEndian
+        Swift.withUnsafeBytes(of: &little) { bytes in
+            append(contentsOf: bytes)
+        }
+    }
+
+    mutating func appendUInt32LE(_ value: UInt32) {
+        var little = value.littleEndian
+        Swift.withUnsafeBytes(of: &little) { bytes in
+            append(contentsOf: bytes)
+        }
+    }
+}
+
+private enum SimpleZIP {
+    private static let crcTable: [UInt32] = (0..<256).map { index in
+        var value = UInt32(index)
+        for _ in 0..<8 {
+            if value & 1 == 1 {
+                value = 0xEDB88320 ^ (value >> 1)
+            } else {
+                value >>= 1
+            }
+        }
+        return value
+    }
+
+    private static func crc32(_ data: Data) -> UInt32 {
+        var crc: UInt32 = 0xFFFFFFFF
+        for byte in data {
+            let tableIndex = Int((crc ^ UInt32(byte)) & 0xFF)
+            crc = (crc >> 8) ^ crcTable[tableIndex]
+        }
+        return crc ^ 0xFFFFFFFF
+    }
+
+    private static func dosDateTime(_ date: Date = Date()) -> (time: UInt16, date: UInt16) {
+        let calendar = Calendar(identifier: .gregorian)
+        let components = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        let year = min(max(components.year ?? 1980, 1980), 2107) - 1980
+        let month = min(max(components.month ?? 1, 1), 12)
+        let day = min(max(components.day ?? 1, 1), 31)
+        let hour = min(max(components.hour ?? 0, 0), 23)
+        let minute = min(max(components.minute ?? 0, 0), 59)
+        let second = min(max(components.second ?? 0, 0), 59)
+
+        let dosDate = UInt16((year << 9) | (month << 5) | day)
+        let dosTime = UInt16((hour << 11) | (minute << 5) | (second / 2))
+        return (dosTime, dosDate)
+    }
+
+    static func write(entries: [(path: String, data: Data)], to url: URL) throws {
+        var archive = Data()
+        var centralDirectory = Data()
+        let timestamp = dosDateTime()
+
+        for entry in entries {
+            let nameData = Data(entry.path.utf8)
+            let crc = crc32(entry.data)
+            let size = UInt32(entry.data.count)
+            let localOffset = UInt32(archive.count)
+
+            archive.appendUInt32LE(0x04034B50)
+            archive.appendUInt16LE(20)
+            archive.appendUInt16LE(0x0800)
+            archive.appendUInt16LE(0)
+            archive.appendUInt16LE(timestamp.time)
+            archive.appendUInt16LE(timestamp.date)
+            archive.appendUInt32LE(crc)
+            archive.appendUInt32LE(size)
+            archive.appendUInt32LE(size)
+            archive.appendUInt16LE(UInt16(nameData.count))
+            archive.appendUInt16LE(0)
+            archive.append(nameData)
+            archive.append(entry.data)
+
+            centralDirectory.appendUInt32LE(0x02014B50)
+            centralDirectory.appendUInt16LE(20)
+            centralDirectory.appendUInt16LE(20)
+            centralDirectory.appendUInt16LE(0x0800)
+            centralDirectory.appendUInt16LE(0)
+            centralDirectory.appendUInt16LE(timestamp.time)
+            centralDirectory.appendUInt16LE(timestamp.date)
+            centralDirectory.appendUInt32LE(crc)
+            centralDirectory.appendUInt32LE(size)
+            centralDirectory.appendUInt32LE(size)
+            centralDirectory.appendUInt16LE(UInt16(nameData.count))
+            centralDirectory.appendUInt16LE(0)
+            centralDirectory.appendUInt16LE(0)
+            centralDirectory.appendUInt16LE(0)
+            centralDirectory.appendUInt16LE(0)
+            centralDirectory.appendUInt32LE(0)
+            centralDirectory.appendUInt32LE(localOffset)
+            centralDirectory.append(nameData)
+        }
+
+        let centralOffset = UInt32(archive.count)
+        let centralSize = UInt32(centralDirectory.count)
+        archive.append(centralDirectory)
+
+        archive.appendUInt32LE(0x06054B50)
+        archive.appendUInt16LE(0)
+        archive.appendUInt16LE(0)
+        archive.appendUInt16LE(UInt16(entries.count))
+        archive.appendUInt16LE(UInt16(entries.count))
+        archive.appendUInt32LE(centralSize)
+        archive.appendUInt32LE(centralOffset)
+        archive.appendUInt16LE(0)
+
+        try archive.write(to: url, options: .atomic)
+    }
+}
+
+private enum ExcelExporter {
+    private static func xmlEscaped(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&apos;")
+    }
+
+    private static func inlineCell(_ reference: String, _ value: String, style: Int? = nil) -> String {
+        let styleAttribute = style.map { " s=\"\($0)\"" } ?? ""
+        return "<c r=\"\(reference)\" t=\"inlineStr\"\(styleAttribute)><is><t xml:space=\"preserve\">\(xmlEscaped(value))</t></is></c>"
+    }
+
+    private static func numberCell(_ reference: String, _ value: Double, style: Int? = nil) -> String {
+        let styleAttribute = style.map { " s=\"\($0)\"" } ?? ""
+        let number = String(format: "%.0f", locale: Locale(identifier: "en_US_POSIX"), value)
+        return "<c r=\"\(reference)\"\(styleAttribute)><v>\(number)</v></c>"
+    }
+
+    static func write(expenses: [Expense], to url: URL) throws {
+        let dateFormatter = DateFormatter()
+        dateFormatter.locale = Locale(identifier: "vi_VN")
+        dateFormatter.dateFormat = "dd/MM/yyyy"
+
+        let timeFormatter = DateFormatter()
+        timeFormatter.locale = Locale(identifier: "vi_VN")
+        timeFormatter.dateFormat = "HH:mm"
+
+        let generatedFormatter = DateFormatter()
+        generatedFormatter.locale = Locale(identifier: "vi_VN")
+        generatedFormatter.dateFormat = "dd/MM/yyyy HH:mm"
+
+        let sorted = expenses.sorted { $0.date > $1.date }
+        let total = sorted.reduce(0) { $0 + $1.amount }
+        let lastRow = max(5, 5 + sorted.count)
+
+        var rows = ""
+        rows += "<row r=\"1\" ht=\"28\" customHeight=\"1\">\(inlineCell("A1", "CHI TIÊU", style: 1))</row>"
+        rows += "<row r=\"2\">\(inlineCell("A2", "Xuất lúc", style: 4))\(inlineCell("B2", generatedFormatter.string(from: Date())))</row>"
+        rows += "<row r=\"3\">\(inlineCell("A3", "Tổng chi tiêu", style: 4))\(numberCell("E3", total, style: 3))</row>"
+        rows += "<row r=\"5\">\(inlineCell("A5", "Ngày", style: 2))\(inlineCell("B5", "Giờ", style: 2))\(inlineCell("C5", "Nội dung", style: 2))\(inlineCell("D5", "Danh mục", style: 2))\(inlineCell("E5", "Số tiền (VND)", style: 2))</row>"
+
+        for (index, expense) in sorted.enumerated() {
+            let row = 6 + index
+            rows += "<row r=\"\(row)\">"
+            rows += inlineCell("A\(row)", dateFormatter.string(from: expense.date))
+            rows += inlineCell("B\(row)", timeFormatter.string(from: expense.date))
+            rows += inlineCell("C\(row)", expense.note)
+            rows += inlineCell("D\(row)", expense.category.rawValue)
+            rows += numberCell("E\(row)", expense.amount, style: 3)
+            rows += "</row>"
+        }
+
+        let sheetXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+          <sheetViews><sheetView workbookViewId="0"><pane ySplit="5" topLeftCell="A6" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+          <cols>
+            <col min="1" max="1" width="14" customWidth="1"/>
+            <col min="2" max="2" width="10" customWidth="1"/>
+            <col min="3" max="3" width="34" customWidth="1"/>
+            <col min="4" max="4" width="18" customWidth="1"/>
+            <col min="5" max="5" width="20" customWidth="1"/>
+          </cols>
+          <sheetData>\(rows)</sheetData>
+          <mergeCells count="1"><mergeCell ref="A1:E1"/></mergeCells>
+          <autoFilter ref="A5:E\(lastRow)"/>
+        </worksheet>
+        """
+
+        let contentTypes = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+          <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+          <Default Extension="xml" ContentType="application/xml"/>
+          <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+          <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+          <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+        </Types>
+        """
+
+        let rootRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+        </Relationships>
+        """
+
+        let workbook = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <sheets><sheet name="Chi tiêu" sheetId="1" r:id="rId1"/></sheets>
+        </workbook>
+        """
+
+        let workbookRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+          <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+        </Relationships>
+        """
+
+        let styles = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+          <numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0 &quot;₫&quot;"/></numFmts>
+          <fonts count="3">
+            <font><sz val="11"/><name val="Calibri"/><family val="2"/></font>
+            <font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="Calibri"/><family val="2"/></font>
+            <font><b/><color rgb="FF174C3C"/><sz val="18"/><name val="Calibri"/><family val="2"/></font>
+          </fonts>
+          <fills count="3">
+            <fill><patternFill patternType="none"/></fill>
+            <fill><patternFill patternType="gray125"/></fill>
+            <fill><patternFill patternType="solid"><fgColor rgb="FF174C3C"/><bgColor indexed="64"/></patternFill></fill>
+          </fills>
+          <borders count="2">
+            <border><left/><right/><top/><bottom/><diagonal/></border>
+            <border><left style="thin"><color rgb="FFDDE5E1"/></left><right style="thin"><color rgb="FFDDE5E1"/></right><top style="thin"><color rgb="FFDDE5E1"/></top><bottom style="thin"><color rgb="FFDDE5E1"/></bottom><diagonal/></border>
+          </borders>
+          <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+          <cellXfs count="5">
+            <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+            <xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+            <xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+            <xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+            <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyFont="1"><alignment horizontal="left"/></xf>
+          </cellXfs>
+          <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+        </styleSheet>
+        """
+
+        let entries: [(path: String, data: Data)] = [
+            ("[Content_Types].xml", Data(contentTypes.utf8)),
+            ("_rels/.rels", Data(rootRels.utf8)),
+            ("xl/workbook.xml", Data(workbook.utf8)),
+            ("xl/_rels/workbook.xml.rels", Data(workbookRels.utf8)),
+            ("xl/styles.xml", Data(styles.utf8)),
+            ("xl/worksheets/sheet1.xml", Data(sheetXML.utf8))
+        ]
+
+        try SimpleZIP.write(entries: entries, to: url)
+    }
+}
+
 // MARK: - Store
 
 final class ExpenseStore: ObservableObject {
@@ -151,6 +417,24 @@ final class ExpenseStore: ObservableObject {
             try csv.write(to: url, atomically: true, encoding: .utf8)
             return url
         } catch {
+            return nil
+        }
+    }
+
+
+    func exportXLSX() -> URL? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd_HHmm"
+
+        let fileName = "ChiTieu-\(formatter.string(from: Date())).xlsx"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+
+        do {
+            try ExcelExporter.write(expenses: expenses, to: url)
+            return url
+        } catch {
+            print("Không thể xuất Excel: \(error)")
             return nil
         }
     }
@@ -628,6 +912,8 @@ struct HistoryView: View {
     @State private var searchText = ""
     @State private var selectedExpense: Expense?
     @State private var shareURL: URL?
+    @State private var showExportOptions = false
+    @State private var exportError = false
 
     private var filtered: [Expense] {
         guard !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -705,12 +991,28 @@ struct HistoryView: View {
             .searchable(text: $searchText, prompt: "Tìm món đã mua...")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: export) {
+                    Button(action: { showExportOptions = true }) {
                         Image(systemName: "square.and.arrow.up")
                     }
                     .disabled(store.expenses.isEmpty)
                     .foregroundColor(AppTheme.green)
                 }
+            }
+            .confirmationDialog("Xuất dữ liệu", isPresented: $showExportOptions, titleVisibility: .visible) {
+                Button("Xuất Excel (.xlsx)") {
+                    exportExcel()
+                }
+                Button("Xuất CSV (.csv)") {
+                    exportCSV()
+                }
+                Button("Hủy", role: .cancel) { }
+            } message: {
+                Text("Chọn định dạng file bạn muốn xuất.")
+            }
+            .alert("Không thể xuất file", isPresented: $exportError) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text("Có lỗi khi tạo file. Hãy thử lại.")
             }
             .sheet(item: $selectedExpense) { expense in
                 EditExpenseView(expense: expense)
@@ -727,8 +1029,20 @@ struct HistoryView: View {
         .navigationViewStyle(StackNavigationViewStyle())
     }
 
-    private func export() {
-        shareURL = store.exportCSV()
+    private func exportExcel() {
+        if let url = store.exportXLSX() {
+            shareURL = url
+        } else {
+            exportError = true
+        }
+    }
+
+    private func exportCSV() {
+        if let url = store.exportCSV() {
+            shareURL = url
+        } else {
+            exportError = true
+        }
     }
 }
 
